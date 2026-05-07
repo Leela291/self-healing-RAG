@@ -1,10 +1,9 @@
 """
-Streamlit UI — Self-Healing RAG Pipeline (Google Gemini, FREE)
-Run: streamlit run ui.py
+Streamlit UI — Self-Healing RAG Pipeline with PDF Upload (Google Gemini, FREE)
 """
 
 import streamlit as st
-import time, os
+import time, os, shutil
 from pathlib import Path
 
 st.set_page_config(page_title="Self-Healing RAG", page_icon="🔄", layout="wide")
@@ -29,6 +28,11 @@ h1,h2,h3 { font-family:'Space Mono',monospace; color:var(--accent); }
     color:white !important; border:none !important;
     font-family:'Space Mono',monospace !important; font-weight:700 !important;
     border-radius:8px !important; padding:0.6rem 1.8rem !important;
+}
+.stFileUploader {
+    background:var(--surface) !important;
+    border:2px dashed var(--accent) !important;
+    border-radius:10px !important;
 }
 .trace-box {
     background:var(--surface); border:1px solid var(--border);
@@ -56,6 +60,12 @@ h1,h2,h3 { font-family:'Space Mono',monospace; color:var(--accent); }
 }
 .metric-val  { font-size:2rem; color:var(--accent); font-weight:700; }
 .metric-label{ font-size:0.7rem; color:var(--muted); margin-top:0.2rem; }
+.source-badge {
+    display:inline-block; padding:3px 12px; border-radius:20px;
+    font-family:'Space Mono',monospace; font-size:0.7rem; font-weight:700;
+    background:#1e3a5f; color:var(--accent); border:1px solid var(--accent);
+    margin-bottom:10px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -71,43 +81,83 @@ st.divider()
 with st.sidebar:
     st.markdown("### 🔑 API Key")
     api_key = st.text_input("Google Gemini API Key", type="password",
-                            placeholder="Paste your key from aistudio.google.com")
+                            placeholder="Paste from aistudio.google.com")
     if api_key:
         os.environ["GOOGLE_API_KEY"] = api_key
         st.success("✅ Key set!")
 
     st.divider()
     st.markdown("### 📚 Knowledge Base")
-    kb_text = st.text_area("Paste your documents", height=260,
-        value="""LangGraph is a library built on LangChain for modeling LLM workflows as stateful cyclical graphs. It supports loops, conditional branching, and shared state between nodes.
 
-Retrieval-Augmented Generation (RAG) enhances LLM responses by retrieving relevant documents from a vector database before generating an answer.
+    # Tabs: PDF or Text
+    tab1, tab2 = st.tabs(["📄 Upload PDF", "✏️ Paste Text"])
 
-Hallucination in LLMs is when a model generates plausible-sounding but factually incorrect information. Self-healing RAG uses a critic to verify answers are grounded in context.
+    with tab1:
+        st.markdown(
+            "<p style='font-family:Inter;font-size:0.8rem;color:#64748b'>"
+            "Upload any PDF — textbook, research paper, notes, etc.</p>",
+            unsafe_allow_html=True,
+        )
+        uploaded_pdf = st.file_uploader("Choose a PDF file", type=["pdf"])
 
-Chroma is an open-source vector database for LLM apps. It stores embeddings and supports fast similarity search for RAG pipelines.
+        if uploaded_pdf and st.button("⚡ Build from PDF", use_container_width=True):
+            if not os.getenv("GOOGLE_API_KEY"):
+                st.error("Enter your API key first.")
+            else:
+                with st.spinner("Reading & embedding PDF..."):
+                    try:
+                        # Delete old chroma_db
+                        if Path("./chroma_db").exists():
+                            shutil.rmtree("./chroma_db")
+                        from app import build_vectorstore_from_pdf
+                        vs, chunk_count = build_vectorstore_from_pdf(uploaded_pdf.read())
+                        st.success(f"✅ PDF indexed! ({chunk_count} chunks)")
+                        st.session_state["kb_ready"] = True
+                        st.session_state["kb_source"] = f"PDF: {uploaded_pdf.name}"
+                    except Exception as e:
+                        st.error(f"Error: {e}")
 
-Google Gemini is a family of multimodal AI models from Google DeepMind. gemini-1.5-flash is fast and has a very generous free tier.""")
+    with tab2:
+        kb_text = st.text_area("Paste your documents", height=200,
+            placeholder="Paste text here...\n\nSeparate documents with a blank line.",
+            value="""Generative AI creates new content like text, images, and code using patterns learned from training data.
 
-    if st.button("⚡ Build Vector Store", use_container_width=True):
-        if not os.getenv("GOOGLE_API_KEY"):
-            st.error("Enter your API key first.")
-        else:
-            with st.spinner("Embedding documents..."):
-                try:
-                    from app import build_vectorstore
-                    texts = [t.strip() for t in kb_text.split("\n\n") if t.strip()]
-                    build_vectorstore(texts)
-                    st.success(f"✅ {len(texts)} docs indexed!")
-                    st.session_state["kb_ready"] = True
-                except Exception as e:
-                    st.error(f"Error: {e}")
+Large Language Models like GPT-4, Gemini, and Claude are trained on massive text data to understand and generate human language.
+
+RAG (Retrieval-Augmented Generation) fetches relevant documents from a database before generating an answer, reducing hallucinations.
+
+Hallucination is when an AI generates confident but factually wrong information. RAG and critic agents help reduce this.
+
+Embeddings are numerical representations of text that allow semantic search in vector databases like ChromaDB.""")
+
+        if st.button("⚡ Build from Text", use_container_width=True):
+            if not os.getenv("GOOGLE_API_KEY"):
+                st.error("Enter your API key first.")
+            else:
+                with st.spinner("Embedding documents..."):
+                    try:
+                        if Path("./chroma_db").exists():
+                            shutil.rmtree("./chroma_db")
+                        from app import build_vectorstore
+                        texts = [t.strip() for t in kb_text.split("\n\n") if t.strip()]
+                        build_vectorstore(texts)
+                        st.success(f"✅ {len(texts)} docs indexed!")
+                        st.session_state["kb_ready"] = True
+                        st.session_state["kb_source"] = "Text input"
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+    if st.session_state.get("kb_source"):
+        st.markdown(
+            f'<div class="source-badge">📌 Source: {st.session_state["kb_source"]}</div>',
+            unsafe_allow_html=True,
+        )
 
     st.divider()
     st.markdown(
         "<p style='font-family:Space Mono;font-size:0.62rem;color:#334155'>"
-        "Model: gemini-1.5-flash (FREE)<br>"
-        "Embeddings: embedding-001 (FREE)<br>"
+        "Model: gemini-2.0-flash (FREE)<br>"
+        "Embeddings: gemini-embedding-001<br>"
         "Vector DB: ChromaDB<br>"
         "Orchestration: LangGraph</p>",
         unsafe_allow_html=True,
@@ -116,7 +166,7 @@ Google Gemini is a family of multimodal AI models from Google DeepMind. gemini-1
 # ── Main ───────────────────────────────────────────────────────────────────────
 col1, col2 = st.columns([3, 1])
 with col1:
-    question = st.text_input("Ask a question", placeholder="e.g. What is LangGraph?",
+    question = st.text_input("Ask a question", placeholder="e.g. What is RAG?",
                              label_visibility="collapsed")
 with col2:
     run_btn = st.button("🚀 Run Pipeline", use_container_width=True)
@@ -158,7 +208,6 @@ if run_btn and question:
                 with m1:
                     st.markdown(f'<div class="metric-card"><div class="metric-val">{result["retry_count"]}</div><div class="metric-label">RETRIES</div></div>', unsafe_allow_html=True)
                 with m2:
-                    ok = result["retry_count"] < MAX_RETRIES if False else True
                     grounded = "[FINALIZE]" in " ".join(result["trace"])
                     color = "#10b981" if grounded else "#f59e0b"
                     label = "✅ GROUNDED" if grounded else "⚠️ DEGRADED"
@@ -185,10 +234,9 @@ RETRIEVE ──► GENERATE ──► CRITIQUE
    ▲                          │
    │       (not grounded)     │ (grounded)
    │              │           ▼
-REFORMULATE ◄─────┘       FINALIZE ──► ✅ answer
+REFORMULATE ◄─────┘       FINALIZE ──► answer
                 │
         (max retries hit)
-                │
                 ▼
         GRACEFUL DEGRADE ──► "I don't have enough info"
 """, language="text")
