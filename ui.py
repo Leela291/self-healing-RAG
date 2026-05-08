@@ -1,5 +1,5 @@
 """
-Streamlit UI — Self-Healing RAG Pipeline with PDF Upload (Google Gemini, FREE)
+Streamlit UI — Self-Healing RAG Pipeline with PDF Upload + Conversation History
 """
 
 import streamlit as st
@@ -28,11 +28,6 @@ h1,h2,h3 { font-family:'Space Mono',monospace; color:var(--accent); }
     color:white !important; border:none !important;
     font-family:'Space Mono',monospace !important; font-weight:700 !important;
     border-radius:8px !important; padding:0.6rem 1.8rem !important;
-}
-.stFileUploader {
-    background:var(--surface) !important;
-    border:2px dashed var(--accent) !important;
-    border-radius:10px !important;
 }
 .trace-box {
     background:var(--surface); border:1px solid var(--border);
@@ -66,6 +61,26 @@ h1,h2,h3 { font-family:'Space Mono',monospace; color:var(--accent); }
     background:#1e3a5f; color:var(--accent); border:1px solid var(--accent);
     margin-bottom:10px;
 }
+.chat-user {
+    background:#1e2d45; border-radius:12px 12px 4px 12px;
+    padding:0.8rem 1rem; margin-bottom:0.5rem;
+    font-family:'Inter',sans-serif; font-size:0.9rem; color:var(--text);
+    text-align:right;
+}
+.chat-ai {
+    background:#0d2137; border:1px solid var(--border);
+    border-radius:12px 12px 12px 4px;
+    padding:0.8rem 1rem; margin-bottom:0.5rem;
+    font-family:'Inter',sans-serif; font-size:0.9rem; color:var(--text);
+}
+.chat-label-user {
+    font-family:'Space Mono',monospace; font-size:0.65rem;
+    color:var(--accent2); text-align:right; margin-bottom:2px;
+}
+.chat-label-ai {
+    font-family:'Space Mono',monospace; font-size:0.65rem;
+    color:var(--accent); margin-bottom:2px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -76,6 +91,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.divider()
+
+# ── Session state init ─────────────────────────────────────────────────────────
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []  # list of {"question": ..., "answer": ..., "retries": ...}
+if "kb_ready" not in st.session_state:
+    st.session_state.kb_ready = False
+if "kb_source" not in st.session_state:
+    st.session_state.kb_source = None
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -89,7 +112,6 @@ with st.sidebar:
     st.divider()
     st.markdown("### 📚 Knowledge Base")
 
-    # Tabs: PDF or Text
     tab1, tab2 = st.tabs(["📄 Upload PDF", "✏️ Paste Text"])
 
     with tab1:
@@ -99,21 +121,20 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
         uploaded_pdf = st.file_uploader("Choose a PDF file", type=["pdf"])
-
         if uploaded_pdf and st.button("⚡ Build from PDF", use_container_width=True):
             if not os.getenv("GOOGLE_API_KEY"):
                 st.error("Enter your API key first.")
             else:
                 with st.spinner("Reading & embedding PDF..."):
                     try:
-                        # Delete old chroma_db
                         if Path("./chroma_db").exists():
                             shutil.rmtree("./chroma_db")
                         from app import build_vectorstore_from_pdf
                         vs, chunk_count = build_vectorstore_from_pdf(uploaded_pdf.read())
                         st.success(f"✅ PDF indexed! ({chunk_count} chunks)")
-                        st.session_state["kb_ready"] = True
-                        st.session_state["kb_source"] = f"PDF: {uploaded_pdf.name}"
+                        st.session_state.kb_ready = True
+                        st.session_state.kb_source = f"PDF: {uploaded_pdf.name}"
+                        st.session_state.chat_history = []  # reset chat on new KB
                     except Exception as e:
                         st.error(f"Error: {e}")
 
@@ -142,18 +163,26 @@ Embeddings are numerical representations of text that allow semantic search in v
                         texts = [t.strip() for t in kb_text.split("\n\n") if t.strip()]
                         build_vectorstore(texts)
                         st.success(f"✅ {len(texts)} docs indexed!")
-                        st.session_state["kb_ready"] = True
-                        st.session_state["kb_source"] = "Text input"
+                        st.session_state.kb_ready = True
+                        st.session_state.kb_source = "Text input"
+                        st.session_state.chat_history = []  # reset chat on new KB
                     except Exception as e:
                         st.error(f"Error: {e}")
 
-    if st.session_state.get("kb_source"):
+    if st.session_state.kb_source:
         st.markdown(
-            f'<div class="source-badge">📌 Source: {st.session_state["kb_source"]}</div>',
+            f'<div class="source-badge">📌 {st.session_state.kb_source}</div>',
             unsafe_allow_html=True,
         )
 
     st.divider()
+
+    # Clear chat button
+    if st.session_state.chat_history:
+        if st.button("🗑️ Clear Chat History", use_container_width=True):
+            st.session_state.chat_history = []
+            st.rerun()
+
     st.markdown(
         "<p style='font-family:Space Mono;font-size:0.62rem;color:#334155'>"
         "Model: gemini-2.0-flash (FREE)<br>"
@@ -163,34 +192,73 @@ Embeddings are numerical representations of text that allow semantic search in v
         unsafe_allow_html=True,
     )
 
-# ── Main ───────────────────────────────────────────────────────────────────────
-col1, col2 = st.columns([3, 1])
-with col1:
-    question = st.text_input("Ask a question", placeholder="e.g. What is RAG?",
-                             label_visibility="collapsed")
-with col2:
-    run_btn = st.button("🚀 Run Pipeline", use_container_width=True)
+# ── Main layout ────────────────────────────────────────────────────────────────
+left, right = st.columns([1, 1])
 
+with left:
+    st.markdown("### 💬 Conversation")
+
+    # Show chat history
+    if st.session_state.chat_history:
+        for chat in st.session_state.chat_history:
+            st.markdown(f'<div class="chat-label-user">You</div><div class="chat-user">{chat["question"]}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="chat-label-ai">🔄 RAG Pipeline</div><div class="chat-ai">{chat["answer"]}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(
+            "<p style='font-family:Inter;color:#334155;font-size:0.85rem'>"
+            "No conversation yet. Ask your first question below! 👇</p>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Input
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        question = st.text_input("Ask a question", placeholder="e.g. What is RAG?",
+                                 label_visibility="collapsed",
+                                 key="question_input")
+    with col2:
+        run_btn = st.button("🚀 Send", use_container_width=True)
+
+with right:
+    st.markdown("### 🔍 Latest Execution Trace")
+    trace_placeholder = st.empty()
+    metrics_placeholder = st.empty()
+
+# ── Run pipeline ───────────────────────────────────────────────────────────────
 if run_btn and question:
     if not os.getenv("GOOGLE_API_KEY"):
         st.error("⚠️ Enter your Gemini API key in the sidebar.")
     elif not Path("./chroma_db").exists():
         st.warning("⚠️ Build the vector store first (sidebar).")
     else:
-        st.divider()
-        left, right = st.columns([1, 1])
-        with left:
-            st.markdown("### 🔍 Execution Trace")
-        with right:
-            st.markdown("### 💡 Final Answer")
-
         try:
             from app import run_pipeline
+
+            # Build context-aware question using chat history
+            if st.session_state.chat_history:
+                history_context = "\n".join([
+                    f"Q: {c['question']}\nA: {c['answer']}"
+                    for c in st.session_state.chat_history[-3:]  # last 3 exchanges
+                ])
+                full_question = f"Previous conversation:\n{history_context}\n\nNew question: {question}"
+            else:
+                full_question = question
+
             with st.spinner("Pipeline running..."):
                 t0 = time.time()
-                result = run_pipeline(question)
+                result = run_pipeline(full_question)
                 elapsed = time.time() - t0
 
+            # Save to chat history
+            st.session_state.chat_history.append({
+                "question": question,
+                "answer": result["final_answer"],
+                "retries": result["retry_count"],
+            })
+
+            # Show trace on right
             def step_class(s):
                 for tag in ["RETRIEVE","GENERATE","CRITIQUE","REFORMULATE","FINALIZE","DEGRADE"]:
                     if tag in s: return tag.lower()
@@ -201,9 +269,8 @@ if run_btn and question:
                 for s in result["trace"]
             )
 
-            with left:
-                st.markdown(trace_html, unsafe_allow_html=True)
-                st.markdown("<br>", unsafe_allow_html=True)
+            with right:
+                trace_placeholder.markdown(trace_html, unsafe_allow_html=True)
                 m1, m2, m3 = st.columns(3)
                 with m1:
                     st.markdown(f'<div class="metric-card"><div class="metric-val">{result["retry_count"]}</div><div class="metric-label">RETRIES</div></div>', unsafe_allow_html=True)
@@ -215,8 +282,7 @@ if run_btn and question:
                 with m3:
                     st.markdown(f'<div class="metric-card"><div class="metric-val">{elapsed:.1f}s</div><div class="metric-label">LATENCY</div></div>', unsafe_allow_html=True)
 
-            with right:
-                st.markdown(f'<div class="answer-box">{result["final_answer"]}</div>', unsafe_allow_html=True)
+            st.rerun()
 
         except Exception as e:
             st.error(f"Pipeline error: {e}")
@@ -227,14 +293,14 @@ elif run_btn:
 
 with st.expander("📐 Pipeline Architecture"):
     st.code("""
-question
+question + chat history context
    │
    ▼
 RETRIEVE ──► GENERATE ──► CRITIQUE
    ▲                          │
    │       (not grounded)     │ (grounded)
    │              │           ▼
-REFORMULATE ◄─────┘       FINALIZE ──► answer
+REFORMULATE ◄─────┘       FINALIZE ──► answer → saved to chat history
                 │
         (max retries hit)
                 ▼
